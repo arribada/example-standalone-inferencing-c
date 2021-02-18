@@ -36,9 +36,8 @@
 int microphone_audio_signal_get_data(size_t, size_t, float *);
 void microphone_inference_end();
 int run_classifier(signal_t *, ei_impulse_result_t *, bool);
-
-#define SLICE_LENGTH_MS     250         // 4 per second
-#define SLICE_LENGTH_VALUES  (EI_CLASSIFIER_RAW_SAMPLE_COUNT / (1000 / SLICE_LENGTH_MS))
+#define SLICE_LENGTH_MS 250 // 4 per second
+#define SLICE_LENGTH_VALUES (EI_CLASSIFIER_RAW_SAMPLE_COUNT / (1000 / SLICE_LENGTH_MS))
 
 static bool debug_nn = false; // Set this to true to see e.g. features generated from the raw signal
 
@@ -155,18 +154,22 @@ void *initAlsa()
     return capture_handle;
 }
 
+ei_impulse_maf classifier_maf[EI_CLASSIFIER_LABEL_COUNT] = {{0}};
+float run_moving_average_filter(ei_impulse_maf *, float);
+
 /**
  * Classify the current buffer
  */
 void *classify_task(void *vargp)
 {
-    char filename[128] = { 0 };
+    char filename[128] = {0};
 
     // write the WAV file for debug purposes...
     {
         static int classify_counter = 0;
-        struct stat st = { 0 };
-        if (stat("out", &st) == -1) {
+        struct stat st = {0};
+        if (stat("out", &st) == -1)
+        {
             mkdir("out", 0700);
         }
 
@@ -176,24 +179,57 @@ void *classify_task(void *vargp)
         uint32_t srBpsC8 = (wavFreq * 16 * 1) / 8;
 
         uint8_t wav_header[44] = {
-            0x52, 0x49, 0x46, 0x46, // RIFF
-            fileSize & 0xff, (fileSize >> 8) & 0xff, (fileSize >> 16) & 0xff, (fileSize >> 24) & 0xff,
-            0x57, 0x41, 0x56, 0x45, // WAVE
-            0x66, 0x6d, 0x74, 0x20, // fmt
-            0x10, 0x00, 0x00, 0x00, // length of format data
-            0x01, 0x00, // type of format (1=PCM)
-            0x01, 0x00, // number of channels
-            wavFreq & 0xff, (wavFreq >> 8) & 0xff, (wavFreq >> 16) & 0xff, (wavFreq >> 24) & 0xff,
-            srBpsC8 & 0xff, (srBpsC8 >> 8) & 0xff, (srBpsC8 >> 16) & 0xff, (srBpsC8 >> 24) & 0xff,
-            0x02, 0x00, 0x10, 0x00,
-            0x64, 0x61, 0x74, 0x61, // data
-            dataSize & 0xff, (dataSize >> 8) & 0xff, (dataSize >> 16) & 0xff, (dataSize >> 24) & 0xff,
+            0x52,
+            0x49,
+            0x46,
+            0x46, // RIFF
+            fileSize & 0xff,
+            (fileSize >> 8) & 0xff,
+            (fileSize >> 16) & 0xff,
+            (fileSize >> 24) & 0xff,
+            0x57,
+            0x41,
+            0x56,
+            0x45, // WAVE
+            0x66,
+            0x6d,
+            0x74,
+            0x20, // fmt
+            0x10,
+            0x00,
+            0x00,
+            0x00, // length of format data
+            0x01,
+            0x00, // type of format (1=PCM)
+            0x01,
+            0x00, // number of channels
+            wavFreq & 0xff,
+            (wavFreq >> 8) & 0xff,
+            (wavFreq >> 16) & 0xff,
+            (wavFreq >> 24) & 0xff,
+            srBpsC8 & 0xff,
+            (srBpsC8 >> 8) & 0xff,
+            (srBpsC8 >> 16) & 0xff,
+            (srBpsC8 >> 24) & 0xff,
+            0x02,
+            0x00,
+            0x10,
+            0x00,
+            0x64,
+            0x61,
+            0x74,
+            0x61, // data
+            dataSize & 0xff,
+            (dataSize >> 8) & 0xff,
+            (dataSize >> 16) & 0xff,
+            (dataSize >> 24) & 0xff,
         };
 
         snprintf(filename, 128, "out/data.%d.wav", ++classify_counter);
 
         FILE *f = fopen(filename, "w+");
-        if (!f) {
+        if (!f)
+        {
             printf("Failed to create file '%s'\n", filename);
             return NULL;
         }
@@ -206,33 +242,38 @@ void *classify_task(void *vargp)
     signal_t signal;
     signal.total_length = EI_CLASSIFIER_RAW_SAMPLE_COUNT;
     signal.get_data = &microphone_audio_signal_get_data;
-    ei_impulse_result_t result = { 0 };
+    ei_impulse_result_t result = {0};
 
     EI_IMPULSE_ERROR r = run_classifier(&signal, &result, debug_nn);
-    if (r != EI_IMPULSE_OK) {
+    if (r != EI_IMPULSE_OK)
+    {
         printf("ERR: Failed to run classifier (%d)\n", r);
         return NULL;
     }
 
     for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++)
     {
-        printf("%s: %.5f", result.classification[ix].label, result.classification[ix].value);
-#if EI_CLASSIFIER_HAS_ANOMALY == 1
-        printf(", ");
-#else
-        if (ix != EI_CLASSIFIER_LABEL_COUNT - 1)
+        // result.classification[ix].value = run_moving_average_filter(&classifier_maf[ix], result.classification[ix].value);
+
+        if (ix == 1 && result.classification[ix].value > 0.60)
         {
+            printf("%s: %.5f", result.classification[ix].label, result.classification[ix].value);
+#if EI_CLASSIFIER_HAS_ANOMALY == 1
             printf(", ");
+#else
+            if (ix != EI_CLASSIFIER_LABEL_COUNT - 1)
+            {
+                printf(", ");
+            }
+            printf("] %s\n", filename);
         }
 #endif
+        }
+
+        return NULL;
     }
-    printf("] %s\n", filename);
 
-
-    return NULL;
-}
-
-/**
+    /**
  * Roll array elements along a given axis.
  * Elements that roll beyond the last position are re-introduced at the first.
  * @param input_array
@@ -240,113 +281,124 @@ void *classify_task(void *vargp)
  * @param shift The number of places by which elements are shifted.
  * @returns 0 if OK
  */
-static int roll(int16_t *input_array, size_t input_array_size, int shift) {
-    if (shift < 0) {
-        shift = input_array_size + shift;
-    }
+    static int roll(int16_t * input_array, size_t input_array_size, int shift)
+    {
+        if (shift < 0)
+        {
+            shift = input_array_size + shift;
+        }
 
-    if (shift == 0) {
+        if (shift == 0)
+        {
+            return 0;
+        }
+
+        // so we need to allocate a buffer of the size of shift...
+        int16_t *shift_matrix = (int16_t *)malloc(shift * sizeof(int16_t));
+        if (!shift_matrix)
+        {
+            return -1002;
+        }
+
+        // we copy from the end of the buffer into the shift buffer
+        memcpy(shift_matrix, input_array + input_array_size - shift, shift * sizeof(int16_t));
+
+        // now we do a memmove to shift the array
+        memmove(input_array + shift, input_array, (input_array_size - shift) * sizeof(int16_t));
+
+        // and copy the shift buffer back to the beginning of the array
+        memcpy(input_array, shift_matrix, shift * sizeof(int16_t));
+
+        free(shift_matrix);
+
         return 0;
     }
 
-    // so we need to allocate a buffer of the size of shift...
-    int16_t *shift_matrix = (int16_t*)malloc(shift * sizeof(int16_t));
-    if (!shift_matrix) {
-        return -1002;
-    }
-
-    // we copy from the end of the buffer into the shift buffer
-    memcpy(shift_matrix, input_array + input_array_size - shift, shift * sizeof(int16_t));
-
-    // now we do a memmove to shift the array
-    memmove(input_array + shift, input_array, (input_array_size - shift) * sizeof(int16_t));
-
-    // and copy the shift buffer back to the beginning of the array
-    memcpy(input_array, shift_matrix, shift * sizeof(int16_t));
-
-    free(shift_matrix);
-
-    return 0;
-}
-
-/**
+    /**
  * Int16 => Float conversion for the classifier
  */
-static int int16_to_float(int16_t *input, float *output, size_t length) {
-    for (size_t ix = 0; ix < length; ix++) {
-        output[ix] = (float)(input[ix]) / 32768;
+    static int int16_to_float(int16_t * input, float *output, size_t length)
+    {
+        for (size_t ix = 0; ix < length; ix++)
+        {
+            output[ix] = (float)(input[ix]) / 32768;
+        }
+        return 0;
     }
-    return 0;
-}
 
-/**
+    /**
  * @brief      main function. Runs the inferencing loop.
  */
-int main(int argc, char **argv)
-{
-    if (argc < 2) {
-        printf("Requires one parameter (ID of the sound card) in the form of hw:1,0 (where 1=card number, 0=device).\n");
-        printf("You can find these via `aplay -l`. E.g. for:\n");
-        printf("    card 1: Microphone [Yeti Stereo Microphone], device 0: USB Audio [USB Audio]\n");
-        printf("The ID is hw:1,0\n");
-        exit(1);
-    }
-
-    card = argv[1];
-
-    initAlsa();
-
-    signal(SIGINT, microphone_inference_end);
-
-    // allocate a buffer for the slice
-    int16_t slice_buffer[SLICE_LENGTH_VALUES * sizeof(int16_t)];
-    uint32_t classify_count = 0;
-
-    while (1) {
-        int x = snd_pcm_readi(capture_handle, slice_buffer, SLICE_LENGTH_VALUES);
-        if (x != SLICE_LENGTH_VALUES) {
-            printf("Failed to read audio data (%d)\n", x);
-            return 1;
+    int main(int argc, char **argv)
+    {
+        if (argc < 2)
+        {
+            printf("Requires one parameter (ID of the sound card) in the form of hw:1,0 (where 1=card number, 0=device).\n");
+            printf("You can find these via `aplay -l`. E.g. for:\n");
+            printf("    card 1: Microphone [Yeti Stereo Microphone], device 0: USB Audio [USB Audio]\n");
+            printf("The ID is hw:1,0\n");
+            exit(1);
         }
 
-        // so let's say we have a 16000 element classifier_buffer
-        // then we want to move 4000..16000 to position 0..12000
-        // and fill 12000..16000 with the data from slice_buffer
+        card = argv[1];
 
-        // 1. roll -4000 here
-        roll(classifier_buffer, EI_CLASSIFIER_RAW_SAMPLE_COUNT, -SLICE_LENGTH_VALUES);
+        initAlsa();
 
-        // 2. copy slice buffer to the end
-        const size_t classifier_buffer_offset = EI_CLASSIFIER_RAW_SAMPLE_COUNT - SLICE_LENGTH_VALUES;
-        memcpy(classifier_buffer + classifier_buffer_offset, slice_buffer, SLICE_LENGTH_VALUES * sizeof(int16_t));
+        signal(SIGINT, microphone_inference_end);
 
-        // ignore the first 4 slices we classify, we don't have a complete frame yet
-        if (++classify_count < 4) {
-            continue;
+        // allocate a buffer for the slice
+        int16_t slice_buffer[SLICE_LENGTH_VALUES * sizeof(int16_t)];
+        uint32_t classify_count = 0;
+
+        while (1)
+        {
+            int x = snd_pcm_readi(capture_handle, slice_buffer, SLICE_LENGTH_VALUES);
+            if (x != SLICE_LENGTH_VALUES)
+            {
+                printf("Failed to read audio data (%d)\n", x);
+                return 1;
+            }
+
+            // so let's say we have a 16000 element classifier_buffer
+            // then we want to move 4000..16000 to position 0..12000
+            // and fill 12000..16000 with the data from slice_buffer
+
+            // 1. roll -4000 here
+            roll(classifier_buffer, EI_CLASSIFIER_RAW_SAMPLE_COUNT, -SLICE_LENGTH_VALUES);
+
+            // 2. copy slice buffer to the end
+            const size_t classifier_buffer_offset = EI_CLASSIFIER_RAW_SAMPLE_COUNT - SLICE_LENGTH_VALUES;
+            memcpy(classifier_buffer + classifier_buffer_offset, slice_buffer, SLICE_LENGTH_VALUES * sizeof(int16_t));
+
+            // ignore the first 4 slices we classify, we don't have a complete frame yet
+            if (++classify_count < 4)
+            {
+                continue;
+            }
+
+            // 3. classify on another thread so this one can continue reading
+            //    (not sure if this is buffered already by the library? if so, can get rid of this and classify here)
+            pthread_t classify_thread_id;
+            pthread_create(&classify_thread_id, NULL, classify_task, NULL);
         }
 
-        // 3. classify on another thread so this one can continue reading
-        //    (not sure if this is buffered already by the library? if so, can get rid of this and classify here)
-        pthread_t classify_thread_id;
-        pthread_create(&classify_thread_id, NULL, classify_task, NULL);
+        microphone_inference_end();
     }
 
-    microphone_inference_end();
-}
-
-/**
+    /**
  * Get data from the classifier buffer
  */
-int microphone_audio_signal_get_data(size_t offset, size_t length, float *out_ptr) {
-    return int16_to_float(classifier_buffer + offset, out_ptr, length);
-}
+    int microphone_audio_signal_get_data(size_t offset, size_t length, float *out_ptr)
+    {
+        return int16_to_float(classifier_buffer + offset, out_ptr, length);
+    }
 
-void microphone_inference_end()
-{
-    snd_pcm_drop(capture_handle);
-    snd_pcm_close(capture_handle);
-    exit(0);
-}
+    void microphone_inference_end()
+    {
+        snd_pcm_drop(capture_handle);
+        snd_pcm_close(capture_handle);
+        exit(0);
+    }
 
 #if !defined(EI_CLASSIFIER_SENSOR) || EI_CLASSIFIER_SENSOR != EI_CLASSIFIER_SENSOR_MICROPHONE
 #error "Invalid model for current sensor."
